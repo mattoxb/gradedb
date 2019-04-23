@@ -1,0 +1,843 @@
+Grade Database
+
+* Headers
+
+We use =argparse= for command line argument parsing.
+There are a lot of options.  The =BeautifulSoup= library
+lets us parse the roster files, which are given as HTML tables.
+We use the =github= API to help manage github repostories.
+The rest of the imports are fairly standard.
+
+#+BEGIN_SRC python :noweb-ref imports
+import argparse
+import re
+import subprocess
+import csv
+import psycopg2
+import psycopg2.extras
+import sys
+import time
+import os
+import sqlalchemy
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy import Column, Integer, String, Unicode, Float, UniqueConstraint, ForeignKey
+from bs4 import BeautifulSoup
+from github import Github
+#+END_SRC
+
+We also have a table package we wrote to pring ASCII text tables nicely.
+
+#+BEGIN_SRC python :noweb-ref imports
+sys.path += ['/home/mattox/class/bin']
+
+from table import *
+#+END_SRC
+
+* Globals
+
+We use some default parameters so that the usual course is the one we operate
+on each time.  Maybe this should be set in the database instead?
+
+The =header= variable contains the column labels we will find in the =roster.xml=
+file.
+
+#+BEGIN_SRC python :noweb-ref globals
+default_params = {}
+default_params['semester'] = '2019-01'
+default_params['rubric'] = 'cs421'
+
+header = ["netid", "uin", "admit_term", "gender", "lname", "fname", "pname", "email",
+          "credit", "level", "year", "subject", "number", "section", "crn", "degree", "major",
+          "college", "program_code", "program_name", "ferpa"]
+#+END_SRC
+
+* Database
+
+Put your database password in a file =/home/mattox/.pgpasswd=.  This code
+always runs.  The =get_cursor()= function returns a dictionary cursor from
+Posgres.
+
+#+BEGIN_SRC python :noweb-ref database
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+engine = create_engine('postgresql://localhost/clgdb2')
+Base = declarative_base()
+Session = sessionmaker(bind=engine)
+session = Session()
+#+END_SRC
+
+* The Parser
+
+#+BEGIN_SRC python :noweb-ref parser
+parser = argparse.ArgumentParser()
+parser.add_argument('-r', '--rubric', type=str, help="Set rubric.", action='store')
+parser.add_argument('-s', '--semester', type=str, help="Set semester.", action='store', dest='semester')
+parser.set_defaults(func=lambda x: parser.print_help())
+
+subparsers = parser.add_subparsers()
+add_parser = subparsers.add_parser('add', help="Add things.")
+add_subparsers = add_parser.add_subparsers()
+add_parser.set_defaults(func=lambda x: add_parser.print_help())
+
+list_parser = subparsers.add_parser('list', help="List things.")
+list_subparsers = list_parser.add_subparsers()
+list_parser.set_defaults(func=lambda x: list_parser.print_help())
+
+del_parser = subparsers.add_parser('del', help="Delete things.")
+del_subparsers = del_parser.add_subparsers()
+del_parser.set_defaults(func=lambda x: del_parser.print_help())
+
+# add_subparsers.set_defaults(func=lambda x: add_parser.print_help())
+
+#+END_SRC
+
+* Courses
+
+** Class
+#+BEGIN_SRC python :noweb-ref courses
+class Course(Base):
+  __tablename__ = 'courses'
+
+  id = Column('id', Integer, primary_key=True)
+  rubric = Column('rubric', String(50), nullable=False)
+  semester = Column('semester', String(7), nullable=False)
+  title = Column('title', Unicode(200))
+
+  __table__args__ = (UniqueConstraint('rubric','semester'))
+
+  def __repr__(self):
+     return "<Course %d: %s (%s) \"%s\">" % (self.id,self.rubric,self.semester,self.title)
+#+END_SRC
+
+** Functions
+
+#+BEGIN_SRC python :noweb-ref courses
+def add_course(params):
+   course = Course()
+   course.rubric = params['rubric']
+   course.semester = params['semester']
+   course.title = params['title']
+   session.add(course)
+   session.commit()
+
+def list_courses(params):
+   for instance in session.query(Course).order_by(Course.id):
+       print(instance)
+   
+def get_course(params):
+   return session.query(Course). \
+          filter(Course.rubric==params['rubric']). \
+          filter(Course.semester==params['semester']).first()
+
+#+END_SRC
+** Parser
+
+#+BEGIN_SRC python :noweb-ref parser
+add_course_parser = add_subparsers.add_parser('course', help="Add a course")
+add_course_parser.add_argument('rubric', type=str, help='The rubric')
+add_course_parser.add_argument('semester', type=str, help='The semester, in YYYY-MM format')
+add_course_parser.add_argument('title', type=str, help='The title of the course.')
+add_course_parser.set_defaults(func=add_course)
+
+list_course_parser = list_subparsers.add_parser('courses', help="List courses")
+list_course_parser.set_defaults(func=list_courses)
+#+END_SRC
+
+
+* Students
+
+** Class
+
+header = ["netid", "uin", "admit_term", "gender", "lname", "fname", "pname", "email",
+          "credit", "level", "year", "subject", "number", "section", "crn", "degree", "major",
+          "college", "program_code", "program_name", "ferpa"]
+
+#+BEGIN_SRC python :noweb-ref students
+class Student(Base):
+   __tablename__ = 'students'
+
+   id = Column(Integer, primary_key=True)
+   course_id = Column(Integer, ForeignKey('courses.id'))
+   netid = Column(String(9),nullable=False) 
+   status = Column(String(1),nullable=False)
+   uin = Column(String(9))
+   gender = Column(String(3))
+   lname = Column(String)
+   fname = Column(String)
+   credit = Column(Integer)
+   level = Column(String(2))
+   year = Column(String)
+   subject = Column(String)
+   number = Column(String(4))
+   section = Column(String(4))
+   crn = Column(Integer)
+   degree = Column(String)
+   major = Column(String)
+   college = Column(String)
+   program_code = Column(String)
+   program_name = Column(String)
+   ferpa = Column(String(1))
+   comments = Column(Integer)
+   pname = Column(String)
+   admit_term = Column(String)
+   email = Column(String)
+
+   def __repr__(self):
+      if self.id is not None:
+         return "<Student %d: %s (%s) \"%s\">" % (self.id,self.fname,self.lname,self.netid)
+      else:
+         return "<Student NULL: %s (%s) \"%s\">" % (self.fname,self.lname,self.netid)
+#+END_SRC
+
+** Functions
+
+#+BEGIN_SRC python :noweb-ref students
+def upload_roster(params):
+    course = get_course(params)
+
+    # Open an html table containing the roster.
+
+    table = BeautifulSoup(open(params["fname"],encoding='iso8859').read())
+
+#    if table.select('thead tr')[0] != BeautifulSoup(rosterHeader).select('tr'):
+#        print("Header of html file does not match expected header:\n" + rosterHeader)
+#        print("\n\nTable I got was:\n" + str(table.select('thead tr')[0]))
+#        exit(1)
+
+
+    session.query(Student).filter(Student.course_id==course.id). \
+                           filter(Student.status=='r'). \
+                           update({Student.status: 'D'})
+
+#    cur.execute("update student set status='D' where course_id=%(course_id)s and status='r'", params)
+    print("New Students:")
+
+# "Net ID","UIN","Admit Term","Gender","Last Name","First Name","Preferred Name","Email Address","Credit","Level","Year","Subject","Number","Section","CRN","Degree Name","Major 1 Name","College","Program Code","Program Name","FERPA", 
+
+    for row in table.select('tbody tr'):
+       elts = [td.text for td in row.select('td')]
+       netid = elts[0]
+       q = session.query(Student).filter(Student.course_id == course.id). \
+                                  filter(Student.netid == netid)
+       if q.count() == 0:  # new student
+           s = Student()
+           for (k,v) in zip(["netid","uin","admit_term","gender","lname","fname","pname","email","credit","level","year","subject","number","section","crn","degree","major","college","program_code","program_name","ferpa"],elts):
+               setattr(s,k,v)
+           s.course_id = course.id
+           s.status = 'r'
+           print(s)
+           # We will need to add this too soon.
+           #cur.execute('insert into score (assignment_id,student_id,status,raw) (select id,%(student_id)s,\'p\',0 from assignment where course_id = %(course_id)s)', params )
+           #print(params['netid'])
+       else:
+           s = q.first()
+           s.status = 'r'
+
+       session.add(s)
+
+    session.commit()
+    # Show all the dropped students
+
+    print("Dropped:")
+    for dropee in session.query(Student).filter(Student.course_id == course.id).filter(Student.status=='d').all():
+        print("  {}".format(dropee.netid))
+
+    print("Newly Dropped:")
+    for dropee in session.query(Student).filter(Student.course_id == course.id).filter(Student.status=='D').all():
+        print("  {}".format(dropee.netid))
+        dropee.status = 'd'
+
+    session.commit()
+
+def make_name(fname, pname, lname):
+    "Create a name string from the first, preferred, and last name."
+    if pname:
+        name = fname + ' "' + pname + '" ' + lname
+    else:
+        name = fname + ' ' + lname
+    return name
+
+
+def fuzzy_netid(params):
+    course = get_course(params)
+    print(course)
+    q = session.query(Student)
+    if params["all"]:
+        print("  Including all semesters students.")
+        outstring = "({0.netid}) {0.name} - {0.semester} {0.title}"
+    else:
+        q = q.filter(Student.course_id == course.id)
+        outstring = "({0.netid}) {0.name}"
+
+    if params["dropped"]:
+        print("  Including dropped students.")
+    else:
+        q = q.filter(Student.status=='r')
+
+    nlist = []
+    for row in q.all():
+        if not row.pname:
+            row.pname = None
+        row.name = make_name(row.fname,row.pname,row.lname)
+        nlist.append(outstring.format(row))
+
+    p = subprocess.Popen('fzf-tmux',stdin=subprocess.PIPE,
+                         stdout=subprocess.PIPE)
+    (out,err) = p.communicate('\n'.join(nlist).encode())
+
+    out = out.decode()
+    m = re.match('\((.*)\).*',out)
+    print(m.group(1))
+#+END_SRC
+
+** Parsers
+
+#+BEGIN_SRC python :noweb-ref parser
+roster_parser = subparsers.add_parser('upload-roster', help='Upload / update the roster.')
+roster_parser.add_argument('semester', type=str, help='The semester in YYYY-MM format.')
+roster_parser.add_argument('rubric', type=str, help='The rubric of the course.')
+roster_parser.add_argument('fname', type=str, help='The file name of the roster.')
+roster_parser.set_defaults(func=upload_roster)
+
+netid_parser = subparsers.add_parser('netid', help="Do a fuzzy search on the names in a roster.")
+netid_parser.add_argument('-a', '--all',
+                          action='store_true',
+                          help='Get students from all semesters')
+netid_parser.add_argument('-d', '--dropped',
+                          action='store_true',
+                          help='Include dropped students')
+netid_parser.set_defaults(func=fuzzy_netid)
+#+END_SRC
+
+* Assignment Functions
+** Class
+
+We have two kinds of assignments here; some are "accumulating" scores, others are
+leaf nodes.  An accumulating assignment should not have a =max= field set.  All
+accumulations will use normal forms instead.
+
+Child assignments may use either =factor= or =weight= to adjust the scores, but
+not both.  If =factor= is used, the sum should add to 1 for the children.
+
+#+BEGIN_SRC python :noweb-ref assignments
+
+class Assignment(Base):
+   __tablename__ = 'assignments'
+
+   id = Column(Integer, primary_key=True)
+   course_id = Column(Integer, ForeignKey('courses.id'), nullable=False)
+   parent_id = Column(Integer, ForeignKey('assignments.id'))
+   slug = Column(String,nullable=False) 
+   title = Column(String,nullable=False)
+   max = Column(Integer)
+   factor = Column(Float)
+   weight = Column(Integer)
+   order = Column(Integer)
+   extra = Column(Integer)
+
+   __table__args__ = (UniqueConstraint('course_id','slug'))
+
+   def __repr__(self):
+      if self.id is not None:
+         return "<Assignment %d: %s (%s) \"%s\">" % (self.id,self.slug,self.title,self.max)
+      else:
+         return "<Assignment NULL: %s (%s) \"%s\">" % (self.slug,self.title,self.max)
+
+#+END_SRC
+
+** Functions
+
+Add the assignment.  We check for the parent first, if it was specified.
+
+#+BEGIN_SRC python :noweb-ref assignments
+def add_assignment(params):
+   course = get_course(params)
+
+   # Check to see if the parent exists
+
+   parent_id = None
+
+   if params['parent'] is not None:
+      q = session.query(Assignment).filter(Assignment.course_id == course.id). \
+                                    filter(Assignment.slug == params['parent'])
+      if q.count()==0:
+         print("Error: parent assignment doesn't exist yet.")
+         exit(1)
+      parent_id = q.first().id
+
+   if params['parent_id'] is not None:
+      q = session.query(Assignment).filter(Assignment.course_id == course.id). \
+                                    filter(Assignment.id == int(params['parent_id']))
+      if q.count()==0:
+         print("Error: parent assignment doesn't exist yet.")
+         exit(1)
+
+      parent_id = q.first().id
+
+   # Check to see if the assignment exists
+
+   q = session.query(Assignment).filter(Assignment.course_id == course.id). \
+                                 filter(Assignment.slug == params['slug'])
+   asn = None
+
+   if q.count() == 1:
+      asn = q.first()
+   else:
+      asn = Assignment()
+      asn.slug = params['slug']
+      
+   asn.course_id = course.id
+   asn.title = params['title']
+   asn.parent_id = parent_id
+   if params['max'] is not None:
+      asn.max = int(params['max'])
+   else:
+      asn.max = None
+   if params['factor'] is not None:
+      asn.factor = float(params['factor'])
+   else:
+      asn.factor = None
+   if params['weight'] is not None:
+      asn.weight = int(params['weight'])
+   else:
+      asn.weight = None
+   asn.order = int(params['order'])
+   asn.extra = int(params['extra'])
+
+   session.add(asn)
+   session.commit()
+
+#+END_SRC
+
+Listing assignments.
+
+#+BEGIN_SRC python :noweb-ref assignments
+def list_assignments(params):
+   course = get_course(params)
+   q = session.query(Assignment).filter(Assignment.course_id == course.id).order_by(Assignment.order)
+
+   rows = [['ID', 'Order', 'Parent', 'Slug','Title','Max','Factor','Weight','Extra'], ':hr']
+   for a in q.all():
+       rows = rows + [[a.id,a.order,a.parent_id,a.slug,a.title,a.max,a.factor,a.weight,a.extra]]
+
+   t = Table(rows)
+   print(t)
+#+END_SRC
+
+** Parser
+
+#+BEGIN_SRC python :noweb-ref parser
+# Add assignments
+add_assignment_parser = add_subparsers.add_parser('assignment', help='Add a new assignment')
+add_assignment_parser.add_argument('-p','--parent', type=str, default=None)
+add_assignment_parser.add_argument('-P','--parent-id', type=int, default=None)
+add_assignment_parser.add_argument('slug', type=str)
+add_assignment_parser.add_argument('title', type=str)
+add_assignment_parser.add_argument('-m','--max', type=int, default=None)
+add_assignment_parser.add_argument('-f','--factor', type=float, default=None)
+add_assignment_parser.add_argument('-w','--weight', type=int, default=None)
+add_assignment_parser.add_argument('order', type=int)
+add_assignment_parser.add_argument('-x','-e','--extra', type=int, default=0)
+add_assignment_parser.set_defaults(func=add_assignment)
+
+list_assignments_parser = list_subparsers.add_parser('assignments', help='List the assignments')
+list_assignments_parser.set_defaults(func=list_assignments)
+#+END_SRC
+
+
+* Scores
+
+** Class
+#+BEGIN_SRC python :noweb-ref scores
+class Score(Base):
+   __tablename__ = 'scores'
+
+   id = Column(Integer, primary_key=True)
+   assignment_id = Column(Integer, ForeignKey('assignments.id'), nullable=False)
+   student_id = Column(Integer, ForeignKey('students.id'), nullable=False)
+   status = Column(String(1),nullable=False) 
+   raw = Column(Float)
+   factor = Column(Float)
+   norm = Column(Float)
+   points = Column(Float)
+
+   __table__args__ = (UniqueConstraint('assignment_id','student_id'))
+
+   def __repr__(self):
+      return "<Score %d: (%s,%s) %f %f %f %f>" % (self.id or 0,self.assignment_id,self.student_id,self.raw or 0,self.factor or 0,self.norm or 0,self.points or 0)
+
+#+END_SRC
+
+** Functions
+
+#+BEGIN_SRC python :noweb-ref scores
+def add_score(params):
+   course = get_course(params)
+
+   asn = session.query(Assignment).filter(Assignment.course_id == course.id). \
+                                   filter(Assignment.slug == params['slug']).first()
+
+   stu = session.query(Student).filter(Student.course_id == course.id). \
+                                filter(Student.netid == params['netid']).first()
+
+   q = session.query(Score).filter(Score.assignment_id == asn.id). \
+                            filter(Score.student_id == stu.id)
+
+   score = None
+
+   if q.count() == 0:
+      score = Score()
+      score.assignment_id = asn.id
+      score.student_id = stu.id
+   else:
+      score = q.first()
+
+   if params['raw'] in ['p','x','m','c']:
+      score.status = params['raw']
+      score.raw = None
+   else:
+      score.status = 'g'
+      score.raw = round(float(params['raw']),3)
+
+   session.add(score)
+   session.commit()
+
+#+END_SRC
+
+
+#+BEGIN_SRC python :noweb-ref scores
+def add_score_csv(params):
+   course = get_course(params)
+
+   asn = session.query(Assignment).filter(Assignment.course_id == course.id). \
+                                   filter(Assignment.slug == params['slug']).first()
+
+   if asn is None:
+       print("That assignment is not in the database.")
+       exit(1)
+
+   for (netid,sc) in csv.reader(open(params['filename'])):
+       if netid in ['netid','Username']:
+           continue
+
+       stu = session.query(Student).filter(Student.course_id == course.id). \
+                                    filter(Student.netid == netid).first()
+    
+       if stu is None:
+           print(netid, " not found.")
+           continue
+
+       q = session.query(Score).filter(Score.assignment_id == asn.id). \
+                                filter(Score.student_id == stu.id)
+    
+       score = None
+    
+       if q.count() == 0:
+          score = Score()
+          score.assignment_id = asn.id
+          score.student_id = stu.id
+       else:
+          score = q.first()
+    
+       if sc in ['p','x','m','c']:
+          score.status = sc
+          score.raw = None
+       else:
+          score.status = 'g'
+          score.raw = round(float(sc),3)
+    
+       session.add(score)
+       session.commit()
+#+END_SRC
+
+#+BEGIN_SRC python :noweb-ref scores
+def add_pending_scores(params):
+   course = get_course(params)
+
+   asn = session.query(Assignment).filter(Assignment.course_id == course.id). \
+                                   filter(Assignment.slug == params['slug']).first()
+
+   if asn is None:
+       print("That assignment is not in the database.")
+       exit(1)
+
+   for stu in session.query(Student).filter(Student.status == 'r').all():
+      if session.query(Score).filter(Score.assignment_id == asn.id).filter(Score.student_id == stu.id).count() == 0:
+         sco = Score()
+         sco.assignment_id = asn.id
+         sco.student_id = stu.id
+         sco.status = 'p'
+         session.add(sco)
+         print(stu)
+
+   session.commit()
+
+#+END_SRC
+
+#+BEGIN_SRC python :noweb-ref scores
+def add_missing_scores(params):
+   course = get_course(params)
+
+   asn = session.query(Assignment).filter(Assignment.course_id == course.id). \
+                                   filter(Assignment.slug == params['slug']).first()
+
+   if asn is None:
+       print("That assignment is not in the database.")
+       exit(1)
+
+   session.query(Score).filter(Score.assignment_id == asn.id).filter(Score.status == 'p').update({'raw':0,'status':'m'})
+   session.commit()
+
+#+END_SRC
+
+#+BEGIN_SRC python :noweb-ref scores
+def add_unmissing_scores(params):
+   course = get_course(params)
+
+   asn = session.query(Assignment).filter(Assignment.course_id == course.id). \
+                                   filter(Assignment.slug == params['slug']).first()
+
+   if asn is None:
+       print("That assignment is not in the database.")
+       exit(1)
+
+   session.query(Score).filter(Score.assignment_id == asn.id).filter(Score.status == 'm').update({'raw':0,'status':'p'})
+   session.commit()
+
+#+END_SRC
+** Parser
+
+#+BEGIN_SRC python :noweb-ref parser
+add_score_parser = add_subparsers.add_parser('score', help='Add a score')
+add_score_parser.add_argument('slug', type=str, help='The assignment slug')
+add_score_parser.add_argument('netid', type=str, help='The netid')
+add_score_parser.add_argument('score', type=str, help='The score, or else one of x, p, or m.')
+add_score_parser.set_defaults(func=add_score)
+
+# Add Scores from CSV
+add_score_csv_parser = add_subparsers.add_parser('score_csv', help='Add a score')
+add_score_csv_parser.add_argument('slug', type=str, help='The assignment slug')
+add_score_csv_parser.add_argument('filename', type=str, help='The csv file')
+add_score_csv_parser.set_defaults(func=add_score_csv)
+
+# Add pending scores
+add_score_parser = add_subparsers.add_parser('pending', help='Add pending scores')
+add_score_parser.add_argument('slug', type=str, help='The assignment slug')
+add_score_parser.set_defaults(func=add_pending_scores)
+
+# Add missing scores
+add_score_parser = add_subparsers.add_parser('missing', help='Add missing scores')
+add_score_parser.add_argument('slug', type=str, help='The assignment slug')
+add_score_parser.set_defaults(func=add_missing_scores)
+
+# Add unmissing scores
+add_score_parser = add_subparsers.add_parser('unmissing', help='Set missing scores to pending')
+add_score_parser.add_argument('slug', type=str, help='The assignment slug')
+add_score_parser.set_defaults(func=add_unmissing_scores)
+#+END_SRC
+
+* Report
+
+This function will calculate the scores for a particular netid.
+Use =report= to print it out nicely afterwards.  We start with a slug
+and check: if it has a raw score set, we calculate the normal score and
+set that to the database.
+
+If it has children, we loop over them and set the calculated field
+according to the child scores.  If a score does not exist for a particular
+netid, we ignore it.  Scores everyone has should be created with =add_pending_scores=.
+Other scores are things like exam problems, which not everyone would necessarily
+have.
+
+For use is caluclations, =calculuate_scores= returns the resulting score.
+This can be used to create a normalized score.
+
+#+BEGIN_SRC python :noweb-ref report
+def calculate_scores_aux(params,course,student,asn,score):
+   # Leaf Node
+   # cfactor *must* be predetermined
+   if score.raw is not None:
+      score.norm = round(score.raw / asn.max * 100,3)  # set score should have done this,
+                                              # but maybe we adjust the max score on the assignment.
+      score.points = round(score.norm * score.factor,3)
+      session.add(score)
+      session.commit()
+      return score
+
+   # Factors are top-level
+   if asn.factor is not None:
+      score.factor = asn.factor
+      session.add(score)
+      session.commit()
+  
+   factor = score.factor
+
+   # Collect child assignments and scores
+
+   q = session.query(Assignment,Score).filter(Assignment.course_id == course.id). \
+                                       filter(Assignment.parent_id == asn.id). \
+                                       filter(Score.student_id == student.id). \
+                                       filter(Score.assignment_id == Assignment.id)
+
+   children = []
+   tweight = 0
+
+   for (a_child,s_child) in q.all():
+       children.append((a_child,s_child))
+
+   # If there is no factor, we recurse and sum the factors.
+
+   if factor is None:
+      tfactor = 0.0
+      norm = 0.0
+      points = 0.0
+      for (a_child,s_child) in children:
+          calculate_scores_aux(params,course,student,a_child,s_child)
+          if s_child.status in ['g','m','c']:
+             tfactor = tfactor + s_child.factor
+             norm = norm + s_child.norm * s_child.factor
+             points = points + s_child.points
+      score.factor = round(tfactor,6)
+      score.points = round(points,3)
+      if tfactor>0:
+         score.norm = round(norm / tfactor,3)
+         score.status = 'c'
+      else:
+         score.norm = 0
+
+   # If there is a factor, we need to calculuate the child factors before recursing.
+   else:
+      tweight = 0
+      for (a_child,s_child) in children:
+          if s_child.status != 'x':
+             tweight = tweight + a_child.weight
+
+      # If there is some weight left, recurse
+      if tweight>0:
+         points = 0.0
+         norm = 0.0
+         tfactor = 0.0
+         for (a_child,s_child) in children:
+             if s_child.status != 'x':
+                s_child.factor = round(factor * a_child.weight / tweight, 6)
+                session.add(s_child)
+                calculate_scores_aux(params,course,student,a_child,s_child)
+                if s_child.status in ['g','m','c']:
+                   norm = norm + s_child.norm * s_child.factor
+                   tfactor = tfactor + s_child.factor
+                   points = points + s_child.points
+         score.points = points
+         score.factor = tfactor
+         score.status = 'c'
+         if tfactor>0:
+            score.norm = round(norm / tfactor,3)
+      else:
+         score.points = 0
+         score.norm = 0
+         score.factor = 0
+
+   session.add(score)
+   session.commit()
+   return score
+
+def calculate_scores(params):
+   course = get_course(params)
+
+   asn = session.query(Assignment).filter(Assignment.course_id == course.id). \
+                                   filter(Assignment.slug == 'total').first()
+
+   if asn is None:
+       print("That assignment is not in the database.")
+       exit(1)
+
+   stu = session.query(Student).filter(Student.course_id == course.id). \
+                                filter(Student.netid == params['netid']).first()
+
+   # Erase the factors
+   session.query(Score).filter(Score.student_id == stu.id). \
+                        update({Score.factor: None})
+
+   q = session.query(Score).filter(Score.assignment_id == asn.id). \
+                            filter(Score.student_id == stu.id)
+
+   if q.count() == 0:
+      return None
+
+   score = q.first()
+
+   calculate_scores_aux(params,course,stu,asn,score)
+   
+#+END_SRC
+
+#+BEGIN_SRC python :noweb-ref report
+def nonone(x):
+   if x is None:
+      return ""
+   else: 
+      return x
+
+def report(params):
+   status = {'p': 'Pending',
+              'm': 'Missing',
+              'g': 'Graded',
+        #      'c': 'Calculated',
+              'c': '',
+              'd': 'Dropped',
+              'r': 'Replaced',
+              'x': 'Excused'}
+   calculate_scores(params)
+
+   course = get_course(params)
+
+   stu = session.query(Student).filter(Student.course_id == course.id). \
+                                filter(Student.netid == params['netid']).first()
+
+   levels = {}
+   table = [['Assignment','Status','Raw','Norm','Factor','Points'],':hr']
+   for (a,s) in session.query(Assignment,Score).filter(Assignment.course_id == course.id). \
+                                       filter(Score.assignment_id == Assignment.id). \
+                                       filter(Score.student_id == stu.id). \
+                                       order_by(Assignment.order).all():
+      if a.parent_id is None:
+         levels[a.id] = 0
+      else:
+         levels[a.id] = levels[a.parent_id] + 1
+
+      table = table + [['. ' * levels[a.id] + a.title, status[s.status], nonone(s.raw), s.norm, s.factor, s.points]]
+   t = Table(table)
+   print(t)
+#+END_SRC
+
+** Parser
+
+#+BEGIN_SRC python :noweb-ref parser
+report_parser = subparsers.add_parser('report', help="Show a grade report.")
+report_parser.add_argument('netid',
+                          help='The netid to report.')
+report_parser.set_defaults(func=report)
+#+END_SRC
+
+* Main File
+
+Then we use it in a function:
+
+#+begin_src python :noweb tangle :tangle gb2.py
+#!/usr/bin/env python3
+<<imports>>
+<<globals>>
+<<database>>
+
+<<courses>>
+<<students>>
+<<assignments>>
+<<scores>>
+<<report>>
+
+<<parser>>
+
+# Activate the parser
+
+the_args = parser.parse_args()
+the_args.func(vars(the_args))
+
+#+end_src
